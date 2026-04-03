@@ -1,16 +1,21 @@
 import { executeTool, ModelMessage } from '@ai-sdk/provider-utils';
-import { notify } from '../util/notify';
+import {
+  getToolTimeoutMs,
+  TimeoutConfiguration,
+} from '../prompt/call-settings';
 import { TelemetrySettings } from '../telemetry/telemetry-settings';
+import { notify } from '../util/notify';
 import { now } from '../util/now';
 import {
   GenerateTextOnToolCallFinishCallback,
   GenerateTextOnToolCallStartCallback,
 } from './generate-text';
 import { TypedToolCall } from './tool-call';
-import { ToolOutput } from './tool-output';
-import { ToolSet } from './tool-set';
-import { TypedToolResult } from './tool-result';
 import { TypedToolError } from './tool-error';
+import { ToolOutput } from './tool-output';
+import { TypedToolResult } from './tool-result';
+import type { GenerationContext } from './generation-context';
+import type { ToolSet } from '@ai-sdk/provider-utils';
 
 /**
  * Executes a single tool call and manages its lifecycle callbacks.
@@ -23,16 +28,21 @@ import { TypedToolError } from './tool-error';
  *
  * @returns The tool output (result or error), or undefined if the tool has no execute function.
  */
-export async function executeToolCall<TOOLS extends ToolSet>({
+export async function executeToolCall<
+  TOOLS extends ToolSet,
+  CONTEXT extends GenerationContext<TOOLS>,
+>({
   toolCall,
   tools,
   telemetry,
   callId,
   messages,
   abortSignal,
+  timeout,
   experimental_context,
   stepNumber,
-  model,
+  provider,
+  modelId,
   onPreliminaryToolResult,
   onToolCallStart,
   onToolCallFinish,
@@ -44,9 +54,11 @@ export async function executeToolCall<TOOLS extends ToolSet>({
   callId: string;
   messages: ModelMessage[];
   abortSignal: AbortSignal | undefined;
-  experimental_context: unknown;
+  experimental_context: CONTEXT;
+  timeout?: TimeoutConfiguration<TOOLS>;
   stepNumber?: number;
-  model?: { provider: string; modelId: string };
+  provider?: string;
+  modelId?: string;
   onPreliminaryToolResult?: (result: TypedToolResult<TOOLS>) => void;
   onToolCallStart?:
     | GenerateTextOnToolCallStartCallback<TOOLS>
@@ -70,7 +82,8 @@ export async function executeToolCall<TOOLS extends ToolSet>({
   const baseCallbackEvent = {
     callId,
     stepNumber,
-    model,
+    provider,
+    modelId,
     toolCall,
     messages,
     abortSignal,
@@ -82,6 +95,15 @@ export async function executeToolCall<TOOLS extends ToolSet>({
   let output: unknown;
 
   await notify({ event: baseCallbackEvent, callbacks: onToolCallStart });
+
+  const toolTimeoutMs = getToolTimeoutMs<TOOLS>(timeout, toolName);
+
+  const toolAbortSignal =
+    toolTimeoutMs != null
+      ? abortSignal != null
+        ? AbortSignal.any([abortSignal, AbortSignal.timeout(toolTimeoutMs)])
+        : AbortSignal.timeout(toolTimeoutMs)
+      : abortSignal;
 
   const startTime = now();
 
@@ -101,7 +123,7 @@ export async function executeToolCall<TOOLS extends ToolSet>({
           options: {
             toolCallId,
             messages,
-            abortSignal,
+            abortSignal: toolAbortSignal,
             experimental_context,
           },
         });
